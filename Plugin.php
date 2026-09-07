@@ -6,7 +6,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) exit;
  *
  * @package LlmstxtV2
  * @author Nagi
- * @version 1.0.4
+ * @version 1.0.5
  * @link https://llmstxt.org/
  */
 class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
@@ -27,6 +27,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
 
         Typecho_Plugin::factory('Widget_Archive')->header = array('LlmstxtV2_Plugin', 'injectHeaderLinks');
 
+        // 插件激活时强制执行首次全量生成
         self::doGenerate(true, false);
 
         return '插件已激活。请务必前往插件设置页面查看并配置服务器伪静态规则。';
@@ -59,6 +60,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
     {
         $options = Typecho_Widget::widget('Widget_Options');
 
+        // 拦截后台手动强制重新生成的请求
         if (isset($_GET['action']) && $_GET['action'] === 'force_generate_llms') {
             try {
                 self::doGenerate(true, true);
@@ -167,7 +169,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
     /**
      * 内容变更钩子回调（增量更新入口）
      * 
-     * @param array|null $contents 
+     * @param array|int|null $contents 
      * @param Typecho_Widget|null $widget 
      */
     public static function generate($contents = null, $widget = null)
@@ -182,30 +184,56 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
         $enableMdFiles = isset($pluginOptions->enableMdFiles) ? strval($pluginOptions->enableMdFiles) : '1';
         $cacheBaseDir = __TYPECHO_ROOT_DIR__ . '/usr/uploads/llmstxt/';
 
-        if ($enableMdFiles === '1' && is_array($contents) && isset($contents['title']) && isset($contents['text']) && isset($contents['type'])) {
-            try {
-                $contents['year'] = date('Y', $contents['created']);
-                $contents['month'] = date('m', $contents['created']);
-                $contents['day'] = date('d', $contents['created']);
-                
-                if (isset($contents['category']) && is_array($contents['category']) && !empty($contents['category'])) {
-                    $contents['category'] = current($contents['category']);
-                    $contents['directory'] = $contents['category'];
-                } else {
-                    $contents['category'] = 'default';
-                    $contents['directory'] = 'default';
-                }
+        $cid = null;
+        if ($widget && isset($widget->cid)) {
+            $cid = $widget->cid;
+        } elseif (is_array($contents) && isset($contents['cid'])) {
+            $cid = $contents['cid'];
+        } elseif (is_numeric($contents)) {
+            // 兼容 delete 钩子传入的可能是数字 cid 的情况[cite: 1]
+            $cid = $contents; 
+        }
 
-                $permalink = Typecho_Router::url($contents['type'], $contents, $options->index);
-                self::buildPhysicalMdFile($contents['title'], $contents['text'], $permalink, $options->siteUrl, $cacheBaseDir);
+        // 通过 cid 重新从数据库拉取完整数据，防止钩子数据缺失导致生成 index.md
+        if ($enableMdFiles === '1' && $cid) {
+            try {
+                $db = Typecho_Db::get();
+                $post = $db->fetchRow($db->select()->from('table.contents')->where('cid = ?', $cid)->limit(1));
+
+                if ($post && $post['status'] === 'publish') {
+                    $post['year'] = date('Y', $post['created']);
+                    $post['month'] = date('m', $post['created']);
+                    $post['day'] = date('d', $post['created']);
+                    
+                    if ($post['type'] === 'post') {
+                        $category = $db->fetchRow($db->select('table.metas.slug')
+                            ->from('table.metas')
+                            ->join('table.relationships', 'table.relationships.mid = table.metas.mid')
+                            ->where('table.relationships.cid = ?', $post['cid'])
+                            ->where('table.metas.type = ?', 'category')
+                            ->order('table.metas.order', Typecho_Db::SORT_ASC)
+                            ->limit(1));
+                        
+                        if ($category) {
+                            $post['category'] = $category['slug'];
+                            $post['directory'] = $category['slug'];
+                        } else {
+                            $post['category'] = 'default';
+                            $post['directory'] = 'default';
+                        }
+                    }
+
+                    $permalink = Typecho_Router::url($post['type'], $post, $options->index);
+                    self::buildPhysicalMdFile($post['title'], $post['text'], $permalink, $options->siteUrl, $cacheBaseDir);
+                }
             } catch (Exception $e) {
                 error_log('LlmstxtV2 Incremental Build Error: ' . $e->getMessage());
             }
         }
 
+        // 更新全局 llms.txt 索引
         self::doGenerate(false, false);
     }
-
     /**
      * 执行索引生成与静态资源重构逻辑
      *
@@ -227,6 +255,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             try {
                 $pluginOptions = clone $options->plugin('LlmstxtV2');
             } catch (Typecho_Plugin_Exception $e) {
+                // 环境降级处理机制（适用于初次激活）
                 $pluginOptions = new Typecho_Config();
                 $pluginOptions->siteDescription = '';
                 $pluginOptions->limitPosts = '0';
@@ -238,6 +267,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             $siteTitle = htmlspecialchars($options->title);
             $siteDescription = !empty($pluginOptions->siteDescription) ? htmlspecialchars($pluginOptions->siteDescription) : htmlspecialchars($options->description);
 
+            // 写入 UTF-8 BOM 标识符
             $bom = chr(0xEF) . chr(0xBB) . chr(0xBF);
             $content = $bom . "# {$siteTitle}\n\n";
             
@@ -250,6 +280,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             $enableMdFiles = isset($pluginOptions->enableMdFiles) ? strval($pluginOptions->enableMdFiles) : '1';
             $cacheBaseDir = __TYPECHO_ROOT_DIR__ . '/usr/uploads/llmstxt/';
 
+            // 初始化或清理基础缓存目录结构
             if ($isFullRebuild && $enableMdFiles === '1') {
                 self::deleteDirectory($cacheBaseDir);
                 if (!is_dir($cacheBaseDir)) {
@@ -261,6 +292,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
 
             $content .= "## 文章\n\n";
             
+            // 数据分批处理配置
             $pageSize = 50; 
             $currentPage = 1;
             $processedCount = 0;
@@ -327,6 +359,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
                 $content .= "- 暂无文章\n";
             }
 
+            // 页面类型数据处理逻辑
             if (!empty($pluginOptions->includePages) && $pluginOptions->includePages == '1') {
                 $content .= "\n## 页面\n\n";
                 $pages = $db->fetchAll($db->select()->from('table.contents')
@@ -348,6 +381,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
                 }
             }
 
+            // 写入根目录 llms.txt 文件
             $llmsTxtPath = __TYPECHO_ROOT_DIR__ . '/llms.txt';
             if (@file_put_contents($llmsTxtPath, $content, LOCK_EX) === false) {
                 throw new Exception("根目录索引文件 llms.txt 写入失败。");
@@ -383,7 +417,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
         } else {
             $relativePath = rtrim($relativePath, '/') . '/index.md';
         }
-
+        // 解码与过滤处理：防范目录穿越漏洞
         $relativePath = urldecode($relativePath);
         $relativePath = str_replace(array('../', '..\\'), '', $relativePath);
         
@@ -397,7 +431,7 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
         }
 
         $cleanText = preg_replace('/^<!--markdown-->\s*/', '', $text);
-        
+        // 追加 UTF-8 BOM 以保障浏览器原生查看的编码正确性
         $bom = chr(0xEF) . chr(0xBB) . chr(0xBF);
         $mdContent = $bom . "# {$title}\n\n" . $cleanText;
 
