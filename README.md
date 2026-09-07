@@ -1,0 +1,1 @@
+# typecho-llmstxt-v2
