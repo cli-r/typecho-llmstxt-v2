@@ -6,7 +6,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) exit;
  *
  * @package LlmstxtV2
  * @author Nagi
- * @version 1.0.3
+ * @version 1.0.4
  * @link https://llmstxt.org/
  */
 class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
@@ -27,7 +27,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
 
         Typecho_Plugin::factory('Widget_Archive')->header = array('LlmstxtV2_Plugin', 'injectHeaderLinks');
 
-        // 插件激活时强制执行首次全量生成
         self::doGenerate(true, false);
 
         return '插件已激活。请务必前往插件设置页面查看并配置服务器伪静态规则。';
@@ -60,7 +59,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
     {
         $options = Typecho_Widget::widget('Widget_Options');
 
-        // 拦截后台手动强制重新生成的请求
         if (isset($_GET['action']) && $_GET['action'] === 'force_generate_llms') {
             try {
                 self::doGenerate(true, true);
@@ -72,28 +70,52 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             exit;
         }
 
-        // 构建 UI 元素：触发按钮与伪静态规则
         $triggerUrl = Typecho_Common::url('options-plugin.php?config=LlmstxtV2&action=force_generate_llms', $options->adminUrl);
 
+        // 渲染 UI 与伪静态提示
         $rulesHtml = '<div style="color:#333;background:#E8F6FF;padding:15px;border-left:4px solid #467B96;margin-bottom:20px;">' .
             '<div style="float:right;">' .
             '<a href="' . $triggerUrl . '" style="background:#467B96;color:#fff;padding:6px 15px;text-decoration:none;border-radius:3px;font-size:13px;display:inline-block;box-shadow:0 1px 3px rgba(0,0,0,0.2);">强制重新生成缓存</a>' .
             '</div>' .
             '<h4 style="margin-top:0;"><strong>服务器伪静态配置（必填项）</strong></h4>' .
-            '<p style="font-size:13px;line-height:1.5;">为符合 llms.txt v2 规范并保护物理路径，请在服务器配置文件中加入以下规则：</p>' .
+            '<p style="font-size:13px;line-height:1.5;">为避免访问 .md 文件时被 Typecho 拦截报 404 错误，请在环境配置文件中加入以下规则。<br><span style="color:#d33;">注意：插件的重写规则必须放置在 Typecho 默认路由规则之前！</span></p>' .
+            
             '<strong>Nginx:</strong>' .
-            '<pre style="background:#fff;padding:10px;border:1px solid #ccc;overflow-x:auto;">' .
+            '<pre style="background:#fff;padding:10px;border:1px solid #ccc;overflow-x:auto;margin-bottom:5px;">' .
             "location ^~ /usr/uploads/llmstxt/ {\n    internal;\n}\n\n" .
-            "location ~ \.md$ {\n    rewrite ^/(.*\.md)$ /usr/uploads/llmstxt/$1 last;\n}" .
+            "rewrite ^/(?!usr/uploads/llmstxt/)(.*\.md)$ /usr/uploads/llmstxt/$1 last;\n" .
             '</pre>' .
+            '<details style="margin-bottom:15px;font-size:13px;cursor:pointer;"><summary style="color:#467B96;outline:none;">查看包含 Typecho 默认规则的完整 Nginx 示例（点击展开）</summary>' .
+            '<pre style="background:#f9f9f9;padding:10px;border:1px dashed #ccc;overflow-x:auto;margin-top:5px;cursor:text;">' .
+            "location ^~ /usr/uploads/llmstxt/ {\n    internal;\n}\n\n" .
+            "rewrite ^/(?!usr/uploads/llmstxt/)(.*\.md)$ /usr/uploads/llmstxt/$1 last;\n\n" .
+            "# --- 以下为 Typecho 默认伪静态 ---\n" .
+            "if (!-e \$request_filename) {\n    rewrite ^(.*)$ /index.php\$1 last;\n}\n" .
+            '</pre></details>' .
+            
             '<strong>Apache (.htaccess):</strong>' .
-            '<pre style="background:#fff;padding:10px;border:1px solid #ccc;overflow-x:auto;">' .
-            "RewriteEngine On\n" .
+            '<pre style="background:#fff;padding:10px;border:1px solid #ccc;overflow-x:auto;margin-bottom:5px;">' .
             "RewriteCond %{ENV:REDIRECT_STATUS} ^$\n" .
             "RewriteRule ^usr/uploads/llmstxt/ - [F]\n\n" .
             "RewriteCond %{REQUEST_URI} !^/usr/uploads/llmstxt/\n" .
             "RewriteRule ^(.*\.md)$ usr/uploads/llmstxt/$1 [L]\n" .
-            '</pre></div>';
+            '</pre>' .
+            '<details style="font-size:13px;cursor:pointer;"><summary style="color:#467B96;outline:none;">查看包含 Typecho 默认规则的完整 Apache 示例（点击展开）</summary>' .
+            '<pre style="background:#f9f9f9;padding:10px;border:1px dashed #ccc;overflow-x:auto;margin-top:5px;cursor:text;">' .
+            "&lt;IfModule mod_rewrite.c&gt;\n" .
+            "RewriteEngine On\n" .
+            "RewriteBase /\n\n" .
+            "RewriteCond %{ENV:REDIRECT_STATUS} ^$\n" .
+            "RewriteRule ^usr/uploads/llmstxt/ - [F]\n\n" .
+            "RewriteCond %{REQUEST_URI} !^/usr/uploads/llmstxt/\n" .
+            "RewriteRule ^(.*\.md)$ usr/uploads/llmstxt/$1 [L]\n\n" .
+            "# --- 以下为 Typecho 默认伪静态 ---\n" .
+            "RewriteCond %{REQUEST_FILENAME} !-f\n" .
+            "RewriteCond %{REQUEST_FILENAME} !-d\n" .
+            "RewriteRule ^(.*)$ index.php [L]\n" .
+            "&lt;/IfModule&gt;\n" .
+            '</pre></details>' .
+            '</div>';
         
         $ruleElement = new Typecho_Widget_Helper_Layout('div');
         $ruleElement->html($rulesHtml);
@@ -160,9 +182,20 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
         $enableMdFiles = isset($pluginOptions->enableMdFiles) ? strval($pluginOptions->enableMdFiles) : '1';
         $cacheBaseDir = __TYPECHO_ROOT_DIR__ . '/usr/uploads/llmstxt/';
 
-        // 增量处理：生成或更新当前操作的实体 MD 文件
         if ($enableMdFiles === '1' && is_array($contents) && isset($contents['title']) && isset($contents['text']) && isset($contents['type'])) {
             try {
+                $contents['year'] = date('Y', $contents['created']);
+                $contents['month'] = date('m', $contents['created']);
+                $contents['day'] = date('d', $contents['created']);
+                
+                if (isset($contents['category']) && is_array($contents['category']) && !empty($contents['category'])) {
+                    $contents['category'] = current($contents['category']);
+                    $contents['directory'] = $contents['category'];
+                } else {
+                    $contents['category'] = 'default';
+                    $contents['directory'] = 'default';
+                }
+
                 $permalink = Typecho_Router::url($contents['type'], $contents, $options->index);
                 self::buildPhysicalMdFile($contents['title'], $contents['text'], $permalink, $options->siteUrl, $cacheBaseDir);
             } catch (Exception $e) {
@@ -170,7 +203,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             }
         }
 
-        // 更新全局 llms.txt 索引
         self::doGenerate(false, false);
     }
 
@@ -195,7 +227,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             try {
                 $pluginOptions = clone $options->plugin('LlmstxtV2');
             } catch (Typecho_Plugin_Exception $e) {
-                // 环境降级处理机制（适用于初次激活）
                 $pluginOptions = new Typecho_Config();
                 $pluginOptions->siteDescription = '';
                 $pluginOptions->limitPosts = '0';
@@ -207,7 +238,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             $siteTitle = htmlspecialchars($options->title);
             $siteDescription = !empty($pluginOptions->siteDescription) ? htmlspecialchars($pluginOptions->siteDescription) : htmlspecialchars($options->description);
 
-            // 写入 UTF-8 BOM 标识符
             $bom = chr(0xEF) . chr(0xBB) . chr(0xBF);
             $content = $bom . "# {$siteTitle}\n\n";
             
@@ -220,7 +250,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             $enableMdFiles = isset($pluginOptions->enableMdFiles) ? strval($pluginOptions->enableMdFiles) : '1';
             $cacheBaseDir = __TYPECHO_ROOT_DIR__ . '/usr/uploads/llmstxt/';
 
-            // 初始化或清理基础缓存目录结构
             if ($isFullRebuild && $enableMdFiles === '1') {
                 self::deleteDirectory($cacheBaseDir);
                 if (!is_dir($cacheBaseDir)) {
@@ -232,7 +261,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
 
             $content .= "## 文章\n\n";
             
-            // 数据分批处理配置
             $pageSize = 50; 
             $currentPage = 1;
             $processedCount = 0;
@@ -259,6 +287,26 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
                 }
 
                 foreach ($posts as $post) {
+                    $post['year'] = date('Y', $post['created']);
+                    $post['month'] = date('m', $post['created']);
+                    $post['day'] = date('d', $post['created']);
+
+                    $category = $db->fetchRow($db->select('table.metas.slug')
+                        ->from('table.metas')
+                        ->join('table.relationships', 'table.relationships.mid = table.metas.mid')
+                        ->where('table.relationships.cid = ?', $post['cid'])
+                        ->where('table.metas.type = ?', 'category')
+                        ->order('table.metas.order', Typecho_Db::SORT_ASC)
+                        ->limit(1));
+                    
+                    if ($category) {
+                        $post['category'] = $category['slug'];
+                        $post['directory'] = $category['slug'];
+                    } else {
+                        $post['category'] = 'default';
+                        $post['directory'] = 'default';
+                    }
+
                     $permalink = Typecho_Router::url('post', $post, $options->index);
                     $title = htmlspecialchars($post['title']);
                     $excerpt = self::getPostExcerpt($post['text']);
@@ -279,7 +327,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
                 $content .= "- 暂无文章\n";
             }
 
-            // 页面类型数据处理逻辑
             if (!empty($pluginOptions->includePages) && $pluginOptions->includePages == '1') {
                 $content .= "\n## 页面\n\n";
                 $pages = $db->fetchAll($db->select()->from('table.contents')
@@ -301,7 +348,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
                 }
             }
 
-            // 写入根目录 llms.txt 文件
             $llmsTxtPath = __TYPECHO_ROOT_DIR__ . '/llms.txt';
             if (@file_put_contents($llmsTxtPath, $content, LOCK_EX) === false) {
                 throw new Exception("根目录索引文件 llms.txt 写入失败。");
@@ -338,7 +384,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
             $relativePath = rtrim($relativePath, '/') . '/index.md';
         }
 
-        // 解码与过滤处理：防范目录穿越漏洞
         $relativePath = urldecode($relativePath);
         $relativePath = str_replace(array('../', '..\\'), '', $relativePath);
         
@@ -353,7 +398,6 @@ class LlmstxtV2_Plugin implements Typecho_Plugin_Interface
 
         $cleanText = preg_replace('/^<!--markdown-->\s*/', '', $text);
         
-        // 追加 UTF-8 BOM 以保障浏览器原生查看的编码正确性
         $bom = chr(0xEF) . chr(0xBB) . chr(0xBF);
         $mdContent = $bom . "# {$title}\n\n" . $cleanText;
 
